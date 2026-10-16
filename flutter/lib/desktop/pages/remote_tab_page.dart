@@ -145,7 +145,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
                 SessionCountdownBadge(
                   tabController: tabController,
                   onExpire: () async {
-                    PublicNetworkCooldownManager.instance.startCooldown(300);
+                    PublicNetworkCooldownManager.instance.startCooldown(600);
                     try {
                       await DesktopMultiWindow.invokeMethod(
                         kMainWindowId,

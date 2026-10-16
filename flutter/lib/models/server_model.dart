@@ -14,6 +14,7 @@ import '../common.dart';
 import '../common/formatter/id_formatter.dart';
 import '../desktop/pages/server_page.dart' as desktop;
 import '../desktop/widgets/tabbar_widget.dart';
+import '../desktop/widgets/public_network_notice.dart';
 import '../mobile/pages/server_page.dart';
 import 'model.dart';
 
@@ -47,6 +48,18 @@ class ServerModel with ChangeNotifier {
   final tabController = DesktopTabController(tabType: DesktopTabType.cm);
 
   final List<Client> _clients = [];
+  final Map<int, Timer> _clientSessionTimers = {};
+
+  void _startHostClientSessionTimer(int clientId) {
+    _clientSessionTimers[clientId]?.cancel();
+    _clientSessionTimers[clientId] = Timer(const Duration(seconds: 120), () async {
+      try {
+        await bind.cmCloseConnection(connId: clientId);
+      } catch (_) {}
+      PublicNetworkCooldownManager.instance.startHostCooldown(600);
+      showToast("⚠️ Tiempo de sesión remota finalizado (2 minutos). Esta máquina ha entrado en la cola de espera de 10 minutos.");
+    });
+  }
 
   Timer? cmHiddenTimer;
 
@@ -526,6 +539,12 @@ class ServerModel with ChangeNotifier {
     try {
       final client = Client.fromJson(jsonDecode(evt["client"]));
       if (client.authorized) {
+        if (PublicNetworkCooldownManager.instance.isHostCooldownActive) {
+          bind.cmCloseConnection(connId: client.id);
+          showToast("⚠️ Conexión rechazada: Esta máquina está en cola de espera de 10 minutos.");
+          return;
+        }
+        _startHostClientSessionTimer(client.id);
         parent.target?.dialogManager.dismissByTag(getLoginDialogTag(client.id));
         final index = _clients.indexWhere((c) => c.id == client.id);
         if (index < 0) {
@@ -676,6 +695,12 @@ class ServerModel with ChangeNotifier {
 
   void sendLoginResponse(Client client, bool res) async {
     if (res) {
+      if (PublicNetworkCooldownManager.instance.isHostCooldownActive) {
+        bind.cmCloseConnection(connId: client.id);
+        showToast("⚠️ Conexión rechazada: Esta máquina está en cola de espera de 10 minutos.");
+        return;
+      }
+      _startHostClientSessionTimer(client.id);
       bind.cmLoginRes(connId: client.id, res: res);
       if (!client.isFileTransfer && !client.isTerminal) {
         parent.target?.invokeMethod("start_capture");
@@ -697,6 +722,9 @@ class ServerModel with ChangeNotifier {
     try {
       final id = int.parse(evt['id'] as String);
       final close = (evt['close'] as String) == 'true';
+      _clientSessionTimers[id]?.cancel();
+      _clientSessionTimers.remove(id);
+      PublicNetworkCooldownManager.instance.startHostCooldown(600);
       if (_clients.any((c) => c.id == id)) {
         final index = _clients.indexWhere((client) => client.id == id);
         if (index >= 0) {
@@ -724,6 +752,11 @@ class ServerModel with ChangeNotifier {
   /// peers to go. The sessions end either way; only the close reason differs, and with it
   /// whether the peer is allowed to reconnect. See `ipc::Data::CmWindowClosed`.
   Future<void> closeAll({bool byOperator = true}) async {
+    for (final timer in _clientSessionTimers.values) {
+      timer.cancel();
+    }
+    _clientSessionTimers.clear();
+    PublicNetworkCooldownManager.instance.startHostCooldown(600);
     await Future.wait(_clients.map((client) => byOperator
         ? bind.cmCloseConnection(connId: client.id)
         : bind.cmCloseConnectionWindow(connId: client.id)));

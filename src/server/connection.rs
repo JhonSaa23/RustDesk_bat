@@ -88,6 +88,9 @@ const LOGIN_GRACE: Duration = Duration::from_secs(180);
 /// Connections between accept and authorization, across every transport: the resource bound.
 /// At this many a further arrival is refused and the oldest is told to go, one at a time.
 const MAX_UNAUTHORIZED_CONNS: usize = 64;
+
+/// Global cooldown timestamp (seconds since UNIX epoch) during which the host rejects incoming connections.
+static HOST_PUBLIC_COOLDOWN_UNTIL: AtomicI64 = AtomicI64::new(0);
 /// Of those, how many one address may hold at once: a quarter of the room. A fairness cap
 /// against the cheapest flood, one host with one address, not a security boundary: any pool
 /// of addresses passes it, and the bound above is what holds. Meaningful only while the
@@ -462,6 +465,7 @@ pub struct Connection {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     terminal_user_token: Option<TerminalUserToken>,
     terminal_generic_service: Option<Box<GenericService>>,
+    public_session_start: Option<Instant>,
 }
 
 impl ConnInner {
@@ -658,6 +662,7 @@ impl Connection {
             terminal_generic_service: None,
             conn_audit_primary_auth: ConnAuditPrimaryAuth::None,
             conn_audit_two_factor: ConnAuditTwoFactor::None,
+            public_session_start: None,
         };
         let addr = hbb_common::try_into_v4(addr);
         if !conn.on_open(addr).await {
@@ -1168,6 +1173,22 @@ impl Connection {
                     #[cfg(windows)]
                     conn.portable_check();
                     raii::AuthedConnID::check_wake_lock_on_setting_changed();
+                    if conn.authorized {
+                        if let Some(start) = conn.public_session_start {
+                            if start.elapsed().as_secs() >= 120 {
+                                let now_sec = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                                HOST_PUBLIC_COOLDOWN_UNTIL.store(now_sec + 600, Ordering::SeqCst);
+                                conn.send_close_reason_no_retry(
+                                    "Tiempo de uso finalizado (límite de 2 minutos). Equipo en cola de espera de 10 minutos."
+                                ).await;
+                                conn.on_close("session limit 2min reached", true).await;
+                                break;
+                            }
+                        }
+                    }
                     if let Some((instant, minute)) = conn.auto_disconnect_timer.as_ref() {
                         if instant.elapsed().as_secs() > minute * 60 {
                             conn.send_close_reason_no_retry("Connection failed due to inactivity").await;
@@ -1897,6 +1918,7 @@ impl Connection {
             return false;
         }
         self.authorized = true;
+        self.public_session_start = Some(Instant::now());
         self.unauthorized_id = None;
         // One-time means gone once it has let a peer in, not once that peer
         // leaves. This session's later logins come in on the password the
@@ -2907,6 +2929,22 @@ impl Connection {
         }
         // After handling CloseReason messages, proceed to process other message types
         if let Some(message::Union::LoginRequest(lr)) = msg.union {
+            let now_sec = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let cooldown_until = HOST_PUBLIC_COOLDOWN_UNTIL.load(Ordering::SeqCst);
+            if now_sec < cooldown_until {
+                let remaining = cooldown_until - now_sec;
+                let mins = remaining / 60;
+                let secs = remaining % 60;
+                self.send_login_error(format!(
+                    "Servidor público saturado: Esta máquina está en cola de espera ({:02}:{:02} restantes). Espere a que termine la cola.",
+                    mins, secs
+                )).await;
+                sleep(1.).await;
+                return false;
+            }
             if !self.check_login_scope(&lr).await {
                 return false;
             }
@@ -5291,6 +5329,16 @@ impl Connection {
             return;
         }
         self.closed = true;
+        if self.authorized || self.public_session_start.is_some() {
+            let now_sec = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let current = HOST_PUBLIC_COOLDOWN_UNTIL.load(Ordering::SeqCst);
+            if current < now_sec + 600 {
+                HOST_PUBLIC_COOLDOWN_UNTIL.store(now_sec + 600, Ordering::SeqCst);
+            }
+        }
         // If voice A,B -> C, and A,B has voice call
         // B disconnects, C will reset the voice call input.
         //

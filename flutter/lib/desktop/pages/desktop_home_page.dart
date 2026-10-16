@@ -808,9 +808,9 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           connToken: call.arguments['connToken'],
         );
       } else if (call.method == 'kWindowSessionExpiredPublicNotice') {
-        PublicNetworkCooldownManager.instance.startCooldown(300);
+        PublicNetworkCooldownManager.instance.startCooldown(600);
         showToast(
-          "⚠️ Sesión finalizada (3 minutos). Has entrado en la cola de espera de 5 minutos.",
+          "⚠️ Sesión finalizada (2 minutos). Has entrado en la cola de espera de 10 minutos.",
         );
         showPublicNetworkQueueModal(context);
       } else if (call.method == kWindowBumpMouse) {

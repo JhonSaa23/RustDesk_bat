@@ -10,11 +10,13 @@ class PublicNetworkCooldownManager {
       PublicNetworkCooldownManager._();
 
   static const String _kOptionKey = 'public_cooldown_until';
-  static const int kCooldownDurationSeconds = 300; // 5 minutos de espera
+  static const String _kHostOptionKey = 'host_public_cooldown_until';
+  static const int kCooldownDurationSeconds = 600; // 10 minutos de espera
 
   int _inMemoryCooldownUntilMs = 0;
+  int _inMemoryHostCooldownUntilMs = 0;
 
-  /// Inicia el temporizador de cola de espera (por defecto 300 segundos = 5 minutos).
+  /// Inicia el temporizador de cola de espera para conexiones salientes (600 segundos = 10 minutos).
   void startCooldown([int seconds = kCooldownDurationSeconds]) {
     final untilMs = DateTime.now().millisecondsSinceEpoch + (seconds * 1000);
     _inMemoryCooldownUntilMs = untilMs;
@@ -23,15 +25,26 @@ class PublicNetworkCooldownManager {
     } catch (_) {}
   }
 
-  /// Limpia la cola de espera.
-  void clearCooldown() {
-    _inMemoryCooldownUntilMs = 0;
+  /// Inicia el temporizador de cola de espera del host cuando una máquina es remoteada (600 segundos = 10 minutos).
+  void startHostCooldown([int seconds = kCooldownDurationSeconds]) {
+    final untilMs = DateTime.now().millisecondsSinceEpoch + (seconds * 1000);
+    _inMemoryHostCooldownUntilMs = untilMs;
     try {
-      bind.mainSetOption(key: _kOptionKey, value: '0');
+      bind.mainSetOption(key: _kHostOptionKey, value: untilMs.toString());
     } catch (_) {}
   }
 
-  /// Segundos restantes que debe esperar el usuario antes de poder conectarse.
+  /// Limpia la cola de espera.
+  void clearCooldown() {
+    _inMemoryCooldownUntilMs = 0;
+    _inMemoryHostCooldownUntilMs = 0;
+    try {
+      bind.mainSetOption(key: _kOptionKey, value: '0');
+      bind.mainSetOption(key: _kHostOptionKey, value: '0');
+    } catch (_) {}
+  }
+
+  /// Segundos restantes que debe esperar el usuario antes de poder conectarse (saliente).
   int get remainingSeconds {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     int targetMs = _inMemoryCooldownUntilMs;
@@ -53,8 +66,33 @@ class PublicNetworkCooldownManager {
     return 0;
   }
 
-  /// Indica si el usuario aún se encuentra en tiempo de espera obligatorio.
+  /// Segundos restantes antes de que este equipo host pueda aceptar otra conexión entrante.
+  int get remainingHostSeconds {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    int targetMs = _inMemoryHostCooldownUntilMs;
+
+    if (targetMs <= 0) {
+      try {
+        final val = bind.mainGetOptionSync(key: _kHostOptionKey);
+        if (val.isNotEmpty) {
+          targetMs = int.tryParse(val) ?? 0;
+          _inMemoryHostCooldownUntilMs = targetMs;
+        }
+      } catch (_) {}
+    }
+
+    final diff = targetMs - nowMs;
+    if (diff > 0) {
+      return (diff / 1000).ceil();
+    }
+    return 0;
+  }
+
+  /// Indica si el usuario aún se encuentra en tiempo de espera obligatorio para conectar.
   bool get isUnderCooldown => remainingSeconds > 0;
+
+  /// Indica si esta máquina está en periodo de enfriamiento y debe rechazar conexiones entrantes.
+  bool get isHostCooldownActive => remainingHostSeconds > 0;
 }
 
 /// Modal que abarca la vista informando sobre la saturación del servidor público y la cola de 5 minutos.
@@ -279,7 +317,7 @@ class _PublicNetworkQueueDialogState extends State<PublicNetworkQueueDialog> {
                         ),
                         SizedBox(height: 4),
                         Text(
-                          "Al ser un servidor público, la red se satura debido a la alta concurrencia de conexiones simultáneas. Para evitar caídas y desconexiones abruptas, has entrado en una cola de espera. Debes esperar 5 minutos para volver a conectarte.",
+                          "Al ser un servidor público, la red se satura debido a la alta concurrencia de conexiones simultáneas. Para evitar caídas y desconexiones abruptas, has entrado en una cola de espera. Debes esperar 10 minutos para volver a conectarte.",
                           style: TextStyle(
                             fontSize: 11,
                             color: Colors.white70,
@@ -327,7 +365,7 @@ class _PublicNetworkQueueDialogState extends State<PublicNetworkQueueDialog> {
   }
 }
 
-/// Diálogo modal con el anuncio de advertencia sobre la red pública y el límite de 3 minutos.
+/// Diálogo modal con el anuncio de advertencia sobre la red pública y el límite de 2 minutos.
 void showPublicNetworkNoticeDialog(BuildContext context, {bool isExpired = false}) {
   showDialog(
     context: context,
@@ -357,7 +395,7 @@ void showPublicNetworkNoticeDialog(BuildContext context, {bool isExpired = false
               const SizedBox(height: 16),
               Text(
                 isExpired
-                    ? "Sesión Finalizada (Límite de 3 Minutos)"
+                    ? "Sesión Finalizada (Límite de 2 Minutos)"
                     : "Advertencia de Seguridad",
                 style: const TextStyle(
                   fontSize: 18,
@@ -400,8 +438,8 @@ void showPublicNetworkNoticeDialog(BuildContext context, {bool isExpired = false
               const SizedBox(height: 14),
               Text(
                 isExpired
-                    ? "La sesión remota se ha cerrado automáticamente porque se alcanzaron los 3 minutos máximos establecidos.\n\nAl ser un servidor público, has entrado en una cola de espera de 5 minutos antes de poder volver a conectarte."
-                    : "Este es un proyecto público. Tenga en cuenta que su equipo puede ser vulnerado a través de la red pública de RustDesk.\n\nPor motivos de seguridad, cada sesión remota cuenta con un temporizador estricto de 3 minutos y se cerrará automáticamente al finalizar el tiempo. Al terminar, deberás esperar 5 minutos en cola para volver a entrar.",
+                    ? "La sesión remota se ha cerrado automáticamente porque se alcanzaron los 2 minutos máximos establecidos.\n\nAl ser un servidor público, has entrado en una cola de espera de 10 minutos antes de poder volver a conectarte."
+                    : "Este es un proyecto público. Tenga en cuenta que su equipo puede ser vulnerado a través de la red pública de RustDesk.\n\nPor motivos de seguridad, cada sesión remota cuenta con un temporizador estricto de 2 minutos y se cerrará automáticamente al finalizar el tiempo. Al terminar, deberás esperar 10 minutos en cola para volver a entrar.",
                 style: const TextStyle(
                   fontSize: 13,
                   color: Colors.white70,
@@ -452,7 +490,7 @@ class SessionCountdownBadge extends StatefulWidget {
 }
 
 class _SessionCountdownBadgeState extends State<SessionCountdownBadge> {
-  static const int kInitialCountdownSeconds = 180; // 3 minutos
+  static const int kInitialCountdownSeconds = 120; // 2 minutos
   int _remainingSeconds = kInitialCountdownSeconds;
   Timer? _timer;
   StreamSubscription? _tabSubscription;
@@ -481,7 +519,7 @@ class _SessionCountdownBadgeState extends State<SessionCountdownBadge> {
         ..clear()
         ..addAll(currentKeys);
 
-      // Reiniciar contador de 3 minutos cada vez que entra una sesión o se reconecta
+      // Reiniciar contador de 2 minutos cada vez que entra una sesión o se reconecta
       if (hasNewTab ||
           wasEmpty ||
           _remainingSeconds <= 0 ||
@@ -515,7 +553,7 @@ class _SessionCountdownBadgeState extends State<SessionCountdownBadge> {
     _timer?.cancel();
     _remainingSeconds = kInitialCountdownSeconds;
     _activeTabs.clear();
-    PublicNetworkCooldownManager.instance.startCooldown(300); // Activar cola de espera de 5 min
+    PublicNetworkCooldownManager.instance.startCooldown(600); // Activar cola de espera de 10 min
     if (!mounted) return;
     if (widget.onExpire != null) {
       widget.onExpire!();
@@ -555,7 +593,7 @@ class _SessionCountdownBadgeState extends State<SessionCountdownBadge> {
 
     return Tooltip(
       message:
-          "⚠️ AVISO: Proyecto público. Su equipo puede ser vulnerado en la red pública de RustDesk.\nSesión limitada a 3 minutos ($minutes:$seconds restantes). Clic para más detalles.",
+          "⚠️ AVISO: Proyecto público. Su equipo puede ser vulnerado en la red pública de RustDesk.\nSesión limitada a 2 minutos ($minutes:$seconds restantes). Clic para más detalles.",
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
         onTap: () => showPublicNetworkNoticeDialog(context),
@@ -706,7 +744,7 @@ class _RemoteSessionSecurityBannerState
                     ),
                     SizedBox(height: 2),
                     Text(
-                      "Este es un proyecto público. Tenga en cuenta que su equipo puede ser vulnerado a través de la red pública de RustDesk. La sesión se cerrará automáticamente en 3 minutos.",
+                      "Este es un proyecto público. Tenga en cuenta que su equipo puede ser vulnerado a través de la red pública de RustDesk. La sesión se cerrará automáticamente en 2 minutos.",
                       style: TextStyle(
                         color: Colors.white70,
                         fontSize: 11,
@@ -779,7 +817,7 @@ class PublicNetworkHomeBanner extends StatelessWidget {
                 ),
                 SizedBox(height: 2),
                 Text(
-                  "Proyecto público: Su equipo puede ser vulnerado en la red pública de RustDesk. Sesiones limitadas a 3 minutos con 5 minutos de espera entre reconexiones.",
+                  "Proyecto público: Su equipo puede ser vulnerado en la red pública de RustDesk. Sesiones limitadas a 2 minutos con 10 minutos de espera entre reconexiones.",
                   style: TextStyle(
                     fontSize: 10,
                     color: Color(0xFFFCA5A5),
