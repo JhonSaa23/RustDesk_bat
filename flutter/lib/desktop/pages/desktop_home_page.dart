@@ -808,10 +808,11 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           connToken: call.arguments['connToken'],
         );
       } else if (call.method == 'kWindowSessionExpiredPublicNotice') {
+        PublicNetworkCooldownManager.instance.startCooldown(300);
         showToast(
-          "⚠️ Sesión finalizada (3 minutos). Advertencia: Este es un proyecto público y su equipo puede ser vulnerado en la red pública de RustDesk.",
+          "⚠️ Sesión finalizada (3 minutos). Has entrado en la cola de espera de 5 minutos.",
         );
-        showPublicNetworkNoticeDialog(context, isExpired: true);
+        showPublicNetworkQueueModal(context);
       } else if (call.method == kWindowBumpMouse) {
         return RdPlatformChannel.instance.bumpMouse(
           dx: call.arguments['dx'],

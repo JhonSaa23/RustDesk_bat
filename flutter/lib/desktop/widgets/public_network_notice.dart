@@ -1,6 +1,331 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/models/platform_model.dart';
 import '../widgets/tabbar_widget.dart';
+
+/// Administrador del tiempo de espera y cola de desconexión en red pública.
+class PublicNetworkCooldownManager {
+  PublicNetworkCooldownManager._();
+  static final PublicNetworkCooldownManager instance =
+      PublicNetworkCooldownManager._();
+
+  static const String _kOptionKey = 'public_cooldown_until';
+  static const int kCooldownDurationSeconds = 300; // 5 minutos de espera
+
+  int _inMemoryCooldownUntilMs = 0;
+
+  /// Inicia el temporizador de cola de espera (por defecto 300 segundos = 5 minutos).
+  void startCooldown([int seconds = kCooldownDurationSeconds]) {
+    final untilMs = DateTime.now().millisecondsSinceEpoch + (seconds * 1000);
+    _inMemoryCooldownUntilMs = untilMs;
+    try {
+      bind.mainSetOption(key: _kOptionKey, value: untilMs.toString());
+    } catch (_) {}
+  }
+
+  /// Limpia la cola de espera.
+  void clearCooldown() {
+    _inMemoryCooldownUntilMs = 0;
+    try {
+      bind.mainSetOption(key: _kOptionKey, value: '0');
+    } catch (_) {}
+  }
+
+  /// Segundos restantes que debe esperar el usuario antes de poder conectarse.
+  int get remainingSeconds {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    int targetMs = _inMemoryCooldownUntilMs;
+
+    if (targetMs <= 0) {
+      try {
+        final val = bind.mainGetOptionSync(key: _kOptionKey);
+        if (val.isNotEmpty) {
+          targetMs = int.tryParse(val) ?? 0;
+          _inMemoryCooldownUntilMs = targetMs;
+        }
+      } catch (_) {}
+    }
+
+    final diff = targetMs - nowMs;
+    if (diff > 0) {
+      return (diff / 1000).ceil();
+    }
+    return 0;
+  }
+
+  /// Indica si el usuario aún se encuentra en tiempo de espera obligatorio.
+  bool get isUnderCooldown => remainingSeconds > 0;
+}
+
+/// Modal que abarca la vista informando sobre la saturación del servidor público y la cola de 5 minutos.
+void showPublicNetworkQueueModal(BuildContext context) {
+  showDialog(
+    context: context,
+    barrierDismissible: true,
+    builder: (ctx) => const PublicNetworkQueueDialog(),
+  );
+}
+
+class PublicNetworkQueueDialog extends StatefulWidget {
+  const PublicNetworkQueueDialog({Key? key}) : super(key: key);
+
+  @override
+  State<PublicNetworkQueueDialog> createState() =>
+      _PublicNetworkQueueDialogState();
+}
+
+class _PublicNetworkQueueDialogState extends State<PublicNetworkQueueDialog> {
+  Timer? _ticker;
+  late int _remaining;
+
+  @override
+  void initState() {
+    super.initState();
+    _remaining = PublicNetworkCooldownManager.instance.remainingSeconds;
+    _ticker = Timer.periodic(const Duration(seconds: 1), (timer) {
+      final rem = PublicNetworkCooldownManager.instance.remainingSeconds;
+      if (mounted) {
+        setState(() {
+          _remaining = rem;
+        });
+      }
+      if (rem <= 0) {
+        timer.cancel();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDone = _remaining <= 0;
+    const totalSeconds = PublicNetworkCooldownManager.kCooldownDurationSeconds;
+    final elapsed = totalSeconds - _remaining;
+    final progress = (elapsed / totalSeconds).clamp(0.0, 1.0);
+
+    final minutes = (_remaining ~/ 60).toString().padLeft(2, '0');
+    final seconds = (_remaining % 60).toString().padLeft(2, '0');
+
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      backgroundColor: const Color(0xFF16181F),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+      child: Container(
+        width: 520,
+        padding: const EdgeInsets.all(28),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isDone
+                ? const Color(0xFF10B981).withOpacity(0.6)
+                : const Color(0xFFF59E0B).withOpacity(0.5),
+            width: 1.5,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: (isDone
+                      ? const Color(0xFF10B981)
+                      : const Color(0xFFF59E0B))
+                  .withOpacity(0.14),
+              blurRadius: 32,
+              spreadRadius: 2,
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // Ícono de estado
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: (isDone
+                        ? const Color(0xFF10B981)
+                        : const Color(0xFFF59E0B))
+                    .withOpacity(0.16),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                isDone
+                    ? Icons.check_circle_outline_rounded
+                    : Icons.hourglass_top_rounded,
+                color:
+                    isDone ? const Color(0xFF10B981) : const Color(0xFFF59E0B),
+                size: 44,
+              ),
+            ),
+            const SizedBox(height: 18),
+
+            // Título
+            Text(
+              isDone
+                  ? "¡COLA FINALIZADA!"
+                  : "SERVIDOR PÚBLICO SATURADO",
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+                color:
+                    isDone ? const Color(0xFF10B981) : const Color(0xFFF59E0B),
+                letterSpacing: 0.5,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              isDone
+                  ? "Ya puedes volver a conectarte"
+                  : "En cola de espera para reconexión",
+              style: const TextStyle(
+                fontSize: 13,
+                color: Colors.white70,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            // Tarjeta de contador regresivo
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.35),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: isDone
+                      ? const Color(0xFF10B981).withOpacity(0.3)
+                      : const Color(0xFFF59E0B).withOpacity(0.25),
+                ),
+              ),
+              child: Column(
+                children: [
+                  Text(
+                    isDone ? "00:00" : "$minutes:$seconds",
+                    style: TextStyle(
+                      fontSize: 40,
+                      fontWeight: FontWeight.w800,
+                      fontFamily: 'monospace',
+                      color: isDone
+                          ? const Color(0xFF10B981)
+                          : const Color(0xFFF59E0B),
+                      letterSpacing: 2,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    isDone
+                        ? "Tiempo de espera cumplido"
+                        : "Tiempo de espera restante",
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Colors.white60,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: LinearProgressIndicator(
+                      value: isDone ? 1.0 : progress,
+                      backgroundColor: Colors.white10,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        isDone
+                            ? const Color(0xFF10B981)
+                            : const Color(0xFFF59E0B),
+                      ),
+                      minHeight: 6,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+
+            // Explicación de saturación del servidor público
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEF4444).withOpacity(0.09),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: const Color(0xFFEF4444).withOpacity(0.25),
+                ),
+              ),
+              child: const Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.cloud_off_rounded,
+                    color: Color(0xFFEF4444),
+                    size: 22,
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          "Saturación de Red y Cola de Espera",
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFFFCA5A5),
+                          ),
+                        ),
+                        SizedBox(height: 4),
+                        Text(
+                          "Al ser un servidor público, la red se satura debido a la alta concurrencia de conexiones simultáneas. Para evitar caídas y desconexiones abruptas, has entrado en una cola de espera. Debes esperar 5 minutos para volver a conectarte.",
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.white70,
+                            height: 1.35,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 22),
+
+            // Botón de acción
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: isDone
+                      ? const Color(0xFF10B981)
+                      : const Color(0xFFF59E0B),
+                  foregroundColor:
+                      isDone ? Colors.white : const Color(0xFF1A1A1A),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  elevation: 0,
+                ),
+                onPressed: () => Navigator.of(context).pop(),
+                child: Text(
+                  isDone ? "¡Listo! Conectar ahora" : "Entendido (Esperar en cola)",
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 /// Diálogo modal con el anuncio de advertencia sobre la red pública y el límite de 3 minutos.
 void showPublicNetworkNoticeDialog(BuildContext context, {bool isExpired = false}) {
@@ -75,8 +400,8 @@ void showPublicNetworkNoticeDialog(BuildContext context, {bool isExpired = false
               const SizedBox(height: 14),
               Text(
                 isExpired
-                    ? "La sesión remota se ha cerrado automáticamente porque se alcanzaron los 3 minutos máximos establecidos.\n\nPuede volver a conectarse inmediatamente; cada nueva sesión iniciará un nuevo contador de 3 minutos."
-                    : "Este es un proyecto público. Tenga en cuenta que su equipo puede ser vulnerado a través de la red pública de RustDesk.\n\nPor motivos de seguridad, cada sesión remota cuenta con un temporizador estricto de 3 minutos y se cerrará automáticamente al finalizar el tiempo. Puede volver a entrar una y otra vez.",
+                    ? "La sesión remota se ha cerrado automáticamente porque se alcanzaron los 3 minutos máximos establecidos.\n\nAl ser un servidor público, has entrado en una cola de espera de 5 minutos antes de poder volver a conectarte."
+                    : "Este es un proyecto público. Tenga en cuenta que su equipo puede ser vulnerado a través de la red pública de RustDesk.\n\nPor motivos de seguridad, cada sesión remota cuenta con un temporizador estricto de 3 minutos y se cerrará automáticamente al finalizar el tiempo. Al terminar, deberás esperar 5 minutos en cola para volver a entrar.",
                 style: const TextStyle(
                   fontSize: 13,
                   color: Colors.white70,
@@ -190,6 +515,7 @@ class _SessionCountdownBadgeState extends State<SessionCountdownBadge> {
     _timer?.cancel();
     _remainingSeconds = kInitialCountdownSeconds;
     _activeTabs.clear();
+    PublicNetworkCooldownManager.instance.startCooldown(300); // Activar cola de espera de 5 min
     if (!mounted) return;
     if (widget.onExpire != null) {
       widget.onExpire!();
@@ -453,7 +779,7 @@ class PublicNetworkHomeBanner extends StatelessWidget {
                 ),
                 SizedBox(height: 2),
                 Text(
-                  "Proyecto público: Su equipo puede ser vulnerado en la red pública de RustDesk. Sesiones limitadas a 3 minutos.",
+                  "Proyecto público: Su equipo puede ser vulnerado en la red pública de RustDesk. Sesiones limitadas a 3 minutos con 5 minutos de espera entre reconexiones.",
                   style: TextStyle(
                     fontSize: 10,
                     color: Color(0xFFFCA5A5),
